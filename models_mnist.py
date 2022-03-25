@@ -1,6 +1,6 @@
 import numpy as np
 import time,os
-from sklearn.ensemble import HistGradientBoostingRegressor
+# from sklearn.ensemble import HistGradientBoostingRegressor
 import torch
 import torchvision
 from torch import nn, optim
@@ -27,7 +27,7 @@ class Discriminator(nn.Module):
     z_s = z_s.view(batch_size,512*2*2)
     maps = self.linears(z_s)
     preds = self.layer1(maps)
-    preds = nn.Sigmoid()(preds)
+    preds = nn.Softmax()(preds)
     return maps,preds
     
 class FaderNetwork(nn.Module):
@@ -158,6 +158,31 @@ class FaderNetwork(nn.Module):
       hot_digits[i,digit,:,:] = 1
     
     return self.decode_prob(z_s, hot_digits,skip1,skip2,skip3)
+
+
+class Classifier(nn.Module): #auxiliary classifier that takes in the reconstructed image and predicts the digit 
+  def __init__(self):
+    super().__init__()
+    self.conv_layers = nn.Sequential(
+      nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1),
+      nn.LeakyReLU(0.2),
+      nn.Conv2d(16, 64, kernel_size=3, stride=2, padding=1),
+      nn.LeakyReLU(0.2),
+      nn.Conv2d(64, 256, kernel_size=3, stride=2, padding=1),
+      nn.LeakyReLU(0.2),
+      nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1),
+      nn.LeakyReLU(0.2)
+    )
+    self.final_layer = nn.Sequential(nn.Linear(32,10))
+
+  
+  def forward(self, z_s):
+    batch_size = z_s.shape[0]
+    latents = self.conv_layers(z_s)
+    latents = z_s.view(batch_size, -1)
+    preds = self.final_layer(latents)
+    preds = nn.Softmax()(preds)
+    return preds
 
 
 fader = FaderNetwork().to(device)

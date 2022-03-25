@@ -3,7 +3,7 @@ import time,os
 from argparse import ArgumentParser
 import torch
 import torchvision
-import umap
+# import umap
 from torch import nn, optim
 from torch.nn import functional as F
 from torchvision import datasets, transforms
@@ -13,15 +13,20 @@ from tqdm import tqdm
 from pyutils import population_mean_norm,show
 import matplotlib.pyplot as plt
 from torch.optim import lr_scheduler
-from models import fader, disc
-from mnist import MNIST
+from models_mnist import fader, disc
+from torchsummary import summary
+# from mnist import MNIST
+
+# summary(fader, (1, 28, 28))
+
+# exit()
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu") #use GPU if available
 
 parser = ArgumentParser(description = "customize training")
-parser.add_argument('--disc_schedule', '-ds', default = '0.000001')
-parser.add_argument('--fader_lr', '-f', default = '0.0002')
-parser.add_argument('--disc_lr', '-d', default = '0.0002')
+parser.add_argument('--disc_schedule', '-ds', default = '0.00001')
+parser.add_argument('--fader_lr', '-f', default = '0.002')
+parser.add_argument('--disc_lr', '-d', default = '0.00002')
 args = parser.parse_args()
 
 # -ds 0.003 --fader_lr 0.001 --disc_lr 0.001
@@ -78,7 +83,7 @@ def train(epoch):
     sum_rec_loss = 0
     sum_fader_loss = 0
     disc_weight = 0
-    disc_weight = 0.003 + epoch*float(args.disc_schedule) #Use as a knob for tuning the weight of the discriminator in the loss function
+    disc_weight = 0.0003 + epoch*float(args.disc_schedule) #Use as a knob for tuning the weight of the discriminator in the loss function
 
     for data, labels in tqdm(train_loader, desc="Epoch {}".format(epoch)):
         data = data.to(device)
@@ -125,8 +130,8 @@ def train(epoch):
         reconsts = fader.decode(z, labels,skip1,skip2,skip3)
         rec_loss = F.mse_loss(reconsts, data, reduction='mean')
         sum_rec_loss += rec_loss.item()
-        fader_loss = rec_loss - disc_weight * F.cross_entropy(label_probs, labels, reduction='mean')
-
+        fader_loss = rec_loss - F.cross_entropy(label_probs, labels, reduction='mean')
+        # fader_loss = rec_loss - disc_weight * F.cross_entropy(label_probs, labels, reduction='mean')
 
         fader_loss.backward()
         fader_optim.step()
