@@ -62,7 +62,7 @@ def train(epoch):
     sum_rec_loss = 0
     sum_fader_loss = 0
     disc_weight = 0
-    disc_weight = epoch*float(args.disc_schedule) #Use as a knob for tuning the weight of the discriminator in the loss function
+    disc_weight = 0.03 + epoch*float(args.disc_schedule)  #Use as a knob for tuning the weight of the discriminator in the loss function
 
 
     for data, labels in tqdm(train_loader, desc="Epoch {}".format(epoch)):
@@ -154,11 +154,6 @@ def test(epoch):
             disc_losses += disc_loss.item()
             rec_losses += rec_loss.item()
             disc_accs += disc_acc.item()
-          
-            data_batch = data_batch[:1].to(device)
-            labels = labels[:1].to(device)
-
-            batch_z = fader.encode(data_batch)
 
             '''
             KEYS
@@ -172,14 +167,12 @@ def test(epoch):
             plt.clf()
 
             show(make_grid(data_batch.detach().cpu()), 'Epoch {} Original'.format(epoch),epoch,"img")
+            show(make_grid(reconsts), 'Epoch {} Reconst with Orig Attr'.format(epoch),epoch,"orig")
 
-            reconst = fader.decode(z, hot_digits).cpu()
-            show(make_grid(reconst), 'Epoch {} Reconst with Orig Attr'.format(epoch),epoch,"orig")
-
-            mod_attr = torch.zeros((z.shape[0], 10, 2, 2)).to(device)
+            mod_attr = torch.zeros((data_batch.shape[0], 10, 2, 2)).to(device)
             mod_attr[:,3,:,:] = 1
 
-            fader_reconst = fader.decode(z,mod_attr).cpu()
+            fader_reconst = fader(data_batch, mod_attr).cpu()
             show(make_grid(fader_reconst), 'Epoch {} Reconst With Attr 3'.format(epoch),epoch,"mod")
             break
 

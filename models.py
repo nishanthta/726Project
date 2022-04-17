@@ -30,24 +30,24 @@ class FaderNetwork(nn.Module):
     def __init__(self, latent_space_dim, in_channels, attribute_dim):
         super().__init__()
         enc_layers = [nn.Conv2d(in_channels, 16, kernel_size=3, stride=2, padding=1),
-                  nn.LeakyReLU(0.2), nn.Dropout(0.3),
+                  nn.LeakyReLU(0.2),
                   nn.Conv2d(16, 64, kernel_size=3, stride=2, padding=1),
-                  nn.LeakyReLU(0.2), nn.Dropout(0.3),
+                  nn.LeakyReLU(0.2),
                   nn.Conv2d(64, 256, kernel_size=3, stride=2, padding=1),
-                  nn.LeakyReLU(0.2), nn.Dropout(0.3),
+                  nn.LeakyReLU(0.2),
                   nn.Conv2d(256, latent_space_dim, kernel_size=3, stride=2, padding=1)]
                   
-        dec_layers = [nn.ConvTranspose2d(latent_space_dim+attribute_dim, 128, 3, 2, 1, 1, bias=False),
-                  nn.ReLU(), nn.Dropout(0.3),
-                  nn.ConvTranspose2d(128, 64, 3, 2, 1, bias=False),
-                  nn.ReLU(), nn.Dropout(0.3),
-                  nn.ConvTranspose2d(64, 16, 3, 2, 1, 1, bias=False),
-                  nn.ReLU(), nn.Dropout(0.3),
-                  nn.ConvTranspose2d(16, 1, 3, 2, 1,1, bias=False),
+        self.dec_layers = [nn.ConvTranspose2d(latent_space_dim+attribute_dim, 128, 3, 2, 1, 1, bias=False),
+                  nn.ReLU(),
+                  nn.ConvTranspose2d(128+attribute_dim, 64, 3, 2, 1, bias=False),
+                  nn.ReLU(),
+                  nn.ConvTranspose2d(64+attribute_dim, 16, 3, 2, 1, 1, bias=False),
+                  nn.ReLU(),
+                  nn.ConvTranspose2d(16+attribute_dim, 1, 3, 2, 1,1, bias=False),
+                  nn.ReLU(),
                   nn.Tanh()]
                   
         self.encoder = nn.Sequential(*enc_layers)
-        self.decoder = nn.Sequential(*dec_layers)
 
     def forward(self, images, attr):
         enc = self.encode(images)
@@ -58,14 +58,19 @@ class FaderNetwork(nn.Module):
 
     def decode(self, z, attr):
         z_s = torch.cat([z, attr], dim=1)
+        out = z_s
         
-        
-        # for l in self.dec_layers:
-        #     if type(l) == nn.ConvTranspose2d:
-        #         attr = torch.cat([attr, attr], dim=2)
-        #         attr = torch.cat([attr, attr], dim=3)
-        #         out = torch.cat([out, attr], dim=1)
+        for i,l in enumerate(self.dec_layers):
+            if type(l) == nn.ConvTranspose2d and i > 0:
+                if i == 4:
+                  attr = torch.cat([attr, attr[:,:,:3,:]], dim=2)
+                  attr = torch.cat([attr, attr[:,:,:,:3]], dim=3)
+                  out = torch.cat([out, attr], dim=1)
+                else:
+                  attr = torch.cat([attr, attr], dim=2)
+                  attr = torch.cat([attr, attr], dim=3)
+                  out = torch.cat([out, attr], dim=1)
             
-        #     out = l(out)
+            out = l(out)
 
-        return self.decoder(z_s)
+        return out
