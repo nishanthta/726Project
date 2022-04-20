@@ -1,19 +1,13 @@
-import numpy as np
-import time,os
-from argparse import ArgumentParser
 import torch
-import torchvision
-import umap
-from torch import nn, optim
+from torch import optim
 from torch.nn import functional as F
-from torchvision import datasets, transforms
-from torchvision.utils import make_grid
-import torch.utils.data as utils
+from models import Discriminator, FaderNetwork
+from argparse import ArgumentParser
+import torchvision
 from tqdm import tqdm
-from pyutils import population_mean_norm,show
 import matplotlib.pyplot as plt
-from torch.optim import lr_scheduler
-from models import fader, disc
+from pyutils import show
+from torchvision.utils import make_grid
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu") #use GPU if available
 
@@ -21,21 +15,27 @@ parser = ArgumentParser(description = "customize training")
 parser.add_argument('--disc_schedule', '-ds', default = '0.000001')
 parser.add_argument('--fader_lr', '-f', default = '0.0002')
 parser.add_argument('--disc_lr', '-d', default = '0.0002')
+parser.add_argument('--latent_space_dim', default =256)
+parser.add_argument('--in_channel', default=1)
+parser.add_argument('--attr_dim', default =10)
+parser.add_argument('--print_every', default =10)
+parser.add_argument('--data', default = 'mnist')
 args = parser.parse_args()
 
-#Normalize with population mean and standard deviation
 
-pop_mean, pop_std0 = population_mean_norm(path = "../select")
+# Load Data
 
-train_dataset = torchvision.datasets.ImageFolder(
+train_dataset = None
+if args.data == "mnist":
+    train_dataset = torchvision.datasets.MNIST(
+    root="../mnist/",
+    train=True,
+    download=True,
+    transform=torchvision.transforms.Compose([torchvision.transforms.ToTensor()]))
+else:
+    train_dataset = torchvision.datasets.ImageFolder(
         root="../select",
-
-        transform=transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize(mean=pop_mean, std=pop_std0)
-                ])
-
-    )
+        transform=torchvision.transforms.Compose([torchvision.transforms.ToTensor()]))
 
 train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -43,21 +43,18 @@ train_loader = torch.utils.data.DataLoader(
         num_workers=0,
         shuffle=True
     )
-# print(fader)
 
+# Models
+fader = FaderNetwork(args.latent_space_dim, args.in_channel, args.attr_dim)
+disc = Discriminator(args.latent_space_dim)
 
 #TRAIN/TEST
-
-
-umap_data1 = [] #list of latent space representations for plotting UMAPs
-umap_labels = []
-disc_data = []
 
 fader_optim = optim.Adam(fader.parameters(), lr=float(args.fader_lr), betas=(0.5,0.999))
 disc_optim = optim.Adam(disc.parameters(), lr=float(args.disc_lr), betas=(0.5,0.999))
 
 def train(epoch):
-    fader.train() #set to train mode
+    fader.train() #set to eval mode
     disc.train()
 
     sum_disc_loss = 0
@@ -65,7 +62,7 @@ def train(epoch):
     sum_rec_loss = 0
     sum_fader_loss = 0
     disc_weight = 0
-    disc_weight = epoch*float(args.disc_schedule) #Use as a knob for tuning the weight of the discriminator in the loss function
+    disc_weight = 0.03 + epoch*float(args.disc_schedule)  #Use as a knob for tuning the weight of the discriminator in the loss function
 
 
     for data, labels in tqdm(train_loader, desc="Epoch {}".format(epoch)):
@@ -73,28 +70,16 @@ def train(epoch):
         labels = labels.long().to(device)
         
         # Encode data
-        z,skip1,skip2,skip3 = fader.encode(data)
-
-        if epoch%10 == 0 and z.shape[0] == 32:
-            z_temp = z.view(z.shape[0], 512*2*2)
-            z_temp = z_temp.cpu()
-            temp = z_temp.detach().numpy() 
-            labs = labels.cpu().detach().numpy()
-            umap_data1.append(temp[1]) 
-            umap_labels.append(labs[1])
-
+        z = fader.encode(data)
         
-        # Train discriminator
-        disc_optim.zero_grad()        
-        maps,label_probs = disc(z)
+        # Train discriminator     
+        label_probs = disc(z)
         disc_loss = F.cross_entropy(label_probs, labels, reduction='mean')
         sum_disc_loss += disc_loss.item()
+
+        disc_optim.zero_grad()
         disc_loss.backward()
         disc_optim.step()
-
-        if epoch%10 == 0 and z.shape[0] == 32:
-            temp = maps.cpu().detach().numpy() 
-            disc_data.append(temp[1]) 
 
         # Compute discriminator accuracy
         disc_pred = torch.argmax(label_probs, 1)
@@ -103,40 +88,31 @@ def train(epoch):
         
         
         # Train Fader
-        fader_optim.zero_grad()
-        z,skip1,skip2,skip3 = fader.encode(data)
+        z = fader.encode(data)
         
         # Invariance of latent space from new disc
-        _,label_probs = disc(z)
+        label_probs = disc(z)
+
+        # Prepare attributes
+        batch_size = len(labels)
+        hot_digits = torch.zeros((batch_size, 10, 2, 2)).to(device)
+        labels = labels.long()
+        for i, digit in enumerate(labels):
+            hot_digits[i,digit,:,:] = 1
         
         # Reconstruction
-        reconsts = fader.decode(z, labels,skip1,skip2,skip3)
+        reconsts = fader.decode(z, hot_digits)
         rec_loss = F.mse_loss(reconsts, data, reduction='mean')
         sum_rec_loss += rec_loss.item()
         fader_loss = rec_loss - disc_weight * F.cross_entropy(label_probs, labels, reduction='mean')
 
-
+        fader_optim.zero_grad()
         fader_loss.backward()
         fader_optim.step()
         
         sum_fader_loss += fader_loss.item()        
         
     train_size = len(train_loader.dataset)
-
-
-    if epoch%10 == 0:
-        plt.clf()
-        standard_embedding = umap.UMAP(random_state=42).fit_transform(umap_data1)
-        plt.scatter(standard_embedding[:, 0], standard_embedding[:, 1], c=umap_labels, s=0.1, cmap='Spectral')
-        plt.savefig('results/umapresults_fader'+str(epoch)+'.png')
-        plt.clf()
-        standard_embedding = umap.UMAP(random_state=42).fit_transform(disc_data)
-        plt.scatter(standard_embedding[:, 0], standard_embedding[:, 1], c=umap_labels, s=0.1, cmap='Spectral')
-        plt.savefig('results/umapresults_disc'+str(epoch)+'.png')
-        umap_data1.clear()
-        umap_labels.clear()
-        disc_data.clear()
-
 
     print('\nDisc Weight: {:.8f} | Fader Loss: {:.8f} | Rec Loss: {:.8f} | Disc Loss, Acc: {:.8}, {:.8f}'
           .format(disc_weight, sum_fader_loss/train_size, sum_rec_loss/train_size, 
@@ -150,38 +126,34 @@ def test(epoch):
     rec_losses = 0
     disc_losses = 0
     disc_accs = 0
-    rec_accs = 0
-    flag = 0
+    
     with torch.no_grad():
         for data_batch, labels in train_loader:
+            # Encode batch
             labels = labels.long().to(device)   
             data_batch = data_batch.to(device)
-            z,skip1,skip2,skip3 = fader.encode(data_batch) #record the skip connections to pass over to the decoder
+            z = fader.encode(data_batch)
 
-            _,label_probs = disc(z)
+            # Prepare attributes
+            batch_size = len(labels)
+            hot_digits = torch.zeros((batch_size, 10, 2, 2)).to(device)
+            labels = labels.long()
+            for i, digit in enumerate(labels):
+                hot_digits[i,digit,:,:] = 1
+
+            # Reconstruct
+            label_probs = disc(z)
             disc_loss = F.cross_entropy(label_probs, labels, reduction='mean')
-            reconsts = fader(data_batch, labels)
+
+            reconsts = fader(data_batch, hot_digits)
             rec_loss = F.mse_loss(reconsts, data_batch, reduction='mean')
+
             disc_pred = torch.argmax(label_probs, 1)
             disc_acc = torch.sum(disc_pred == labels)   
 
             disc_losses += disc_loss.item()
             rec_losses += rec_loss.item()
             disc_accs += disc_acc.item()
-          
-            data_batch = data_batch[:1].to(device)
-            labels = labels[:1].to(device)
-
-            batch_z,skip1,skip2,skip3= fader.encode(data_batch)
-
-            con1 = torch.cat((batch_z, batch_z), 0)
-            skip11 = torch.cat([skip1, skip1], 0) 
-            skip22 = torch.cat([skip2, skip2], 0)
-            skip33 = torch.cat([skip3, skip3], 0)
-            con2 = torch.cat((con1, batch_z), 0)
-            con3 = torch.cat((con2, batch_z), 0)
-
-            faders = (torch.tensor([0,1]).long()).to(device)
 
             '''
             KEYS
@@ -194,13 +166,14 @@ def test(epoch):
 
             plt.clf()
 
-            show(make_grid(data_batch.detach().cpu()), 'Epoch {} Original'.format(epoch),epoch,0)
+            show(make_grid(data_batch.detach().cpu()), 'Epoch {} Original'.format(epoch),epoch,"img")
+            show(make_grid(reconsts), 'Epoch {} Reconst with Orig Attr'.format(epoch),epoch,"orig")
 
-            reconst = fader.decode(batch_z,labels,skip1,skip2,skip3).cpu()
-            show(make_grid(reconst.view(1, 3, 256, 256)), 'Epoch {} Reconst with Orig Attr'.format(epoch),epoch,1)
+            mod_attr = torch.zeros((data_batch.shape[0], 10, 2, 2)).to(device)
+            mod_attr[:,3,:,:] = 1
 
-            fader_reconst = fader.decode(con1,faders,skip11,skip22,skip33).cpu()
-            show(make_grid(fader_reconst.view(2, 3, 256, 256), nrow=2), 'Epoch {} Reconst With Attr 0,3'.format(epoch),epoch,2)
+            fader_reconst = fader(data_batch, mod_attr).cpu()
+            show(make_grid(fader_reconst), 'Epoch {} Reconst With Attr 3'.format(epoch),epoch,"mod")
             break
 
         print('Test Rec Loss: {:.8f}'.format(rec_losses / len(train_loader.dataset)))
@@ -216,7 +189,7 @@ for epoch in range(epochs):
     accs.append(disc_acc)
     disc_wts.append(disc_wt)
     
-    if epoch % 50 == 0:
+    if epoch % 10 == 0:
         test(epoch)
         plt.figure(figsize=(9,3))
         plt.subplot(1,3,1)

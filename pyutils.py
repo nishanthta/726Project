@@ -43,5 +43,5 @@ def show(img, title, epoch, orig): #Utility function to show figures and plots
     plt.figure()
     plt.title(title)
     plt.imshow(np.transpose(npimg, (1,2,0)), interpolation='nearest')
-    plt.savefig('results/results'+str(orig)+str(epoch)+'.png')
+    plt.savefig('results/results_'+orig+"_"+str(epoch)+'.png')
 

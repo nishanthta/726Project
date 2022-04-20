@@ -1,167 +1,76 @@
-import numpy as np
-import time,os
+from torch import nn
 import torch
-import torchvision
-from torch import nn, optim
-from torch.nn import functional as F
-import torch.utils.data as utils
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+'''
+    Discriminator
+'''
 class Discriminator(nn.Module):
-  def __init__(self):
+  def __init__(self, latent_space_dim):
     super().__init__()
-    self.layer1 = nn.Sequential(nn.Linear(32,2))
-    self.linears = nn.Sequential(
-        nn.Linear(512*2*2, 512),
-        nn.BatchNorm1d(512),
-        nn.Dropout(0.3),
-        nn.ReLU(),
-        nn.Linear(512, 32),
-        nn.Dropout(0.3),
-        nn.ReLU()
-    )
+    self.latent_space_dim = latent_space_dim
+    layers = [nn.Linear(2*2*latent_space_dim, latent_space_dim),
+              nn.BatchNorm1d(latent_space_dim),
+              nn.Dropout(0.3),
+              nn.ReLU(),
+              nn.Linear(latent_space_dim, 32),
+              nn.Dropout(0.3),
+              nn.ReLU(),
+              nn.Linear(32,10)]
+    self.model = nn.Sequential(*layers)
     
   def forward(self, z_s):
     batch_size = z_s.shape[0]
-    z_s = z_s.view(batch_size,512*2*2)
-    maps = self.linears(z_s)
-    preds = self.layer1(maps)
-    preds = nn.Sigmoid()(preds)
-    return maps,preds
-    
+    z_s = z_s.view(batch_size,self.latent_space_dim*2*2)
+    return self.model(z_s)
+
+'''
+    Fader Network
+'''
 class FaderNetwork(nn.Module):
-  def __init__(self):
-    super().__init__()
-    self.layer1 = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(0.2))
-    self.layer2 = nn.Sequential(
-            nn.Conv2d(16, 32, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(0.2))
-    self.layer3 = nn.Sequential(
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(0.2))
-    self.layer4 = nn.Sequential(
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(0.2))
-    self.layer5 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(0.2))
-    self.layer6 = nn.Sequential(
-            nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(0.2))
-    self.layer7 = nn.Sequential(
-            nn.Conv2d(512, 512, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(0.2))
+    def __init__(self, latent_space_dim, in_channels, attribute_dim):
+        super().__init__()
+        enc_layers = [nn.Conv2d(in_channels, 16, kernel_size=3, stride=2, padding=1),
+                  nn.LeakyReLU(0.2),
+                  nn.Conv2d(16, 64, kernel_size=3, stride=2, padding=1),
+                  nn.LeakyReLU(0.2),
+                  nn.Conv2d(64, 256, kernel_size=3, stride=2, padding=1),
+                  nn.LeakyReLU(0.2),
+                  nn.Conv2d(256, latent_space_dim, kernel_size=3, stride=2, padding=1)]
+                  
+        self.dec_layers = [nn.ConvTranspose2d(latent_space_dim+attribute_dim, 128, 3, 2, 1, 1, bias=False),
+                  nn.ReLU(),
+                  nn.ConvTranspose2d(128+attribute_dim, 64, 3, 2, 1, bias=False),
+                  nn.ReLU(),
+                  nn.ConvTranspose2d(64+attribute_dim, 16, 3, 2, 1, 1, bias=False),
+                  nn.ReLU(),
+                  nn.ConvTranspose2d(16+attribute_dim, 1, 3, 2, 1,1, bias=False),
+                  nn.ReLU(),
+                  nn.Tanh()]
+                  
+        self.encoder = nn.Sequential(*enc_layers)
 
+    def forward(self, images, attr):
+        enc = self.encode(images)
+        return self.decode(enc, attr)
 
+    def encode(self, images):
+        return self.encoder(images)
 
-    self.conv1 = nn.Sequential(
-        nn.ConvTranspose2d(512+2, 512, 4, 2, 1, bias=False),
-        nn.ReLU()
-        )
-    self.conv2 = nn.Sequential(
-        nn.ConvTranspose2d(512+2, 256, 4, 2, 1, bias=False),
-        nn.ReLU()
-        )
-    self.conv3 = nn.Sequential(
-        nn.ConvTranspose2d(256+2, 128, 4, 2, 1, bias=False),
-        nn.ReLU()
-        )
-    self.conv4 = nn.Sequential(
-        nn.ConvTranspose2d(128+2, 64, 4, 2, 1, bias=False),
-        nn.ReLU()
-        )
-    self.conv5 = nn.Sequential(
-        nn.ConvTranspose2d(64+64+2, 32, 4, 2, 1, bias=False),
-        nn.ReLU()
-        )
-    self.conv6 = nn.Sequential(
-        nn.ConvTranspose2d(32+32+2, 16, 4, 2, 1, bias=False),
-        nn.ReLU()
-        )
-    self.conv7 = nn.Sequential(
-        nn.ConvTranspose2d(16+16+2, 3, 4, 2, 1, bias=False),
-        nn.ReLU()
-        )
+    def decode(self, z, attr):
+        z_s = torch.cat([z, attr], dim=1)
+        out = z_s
+        
+        for i,l in enumerate(self.dec_layers):
+            if type(l) == nn.ConvTranspose2d and i > 0:
+                if i == 4:
+                  attr = torch.cat([attr, attr[:,:,:3,:]], dim=2)
+                  attr = torch.cat([attr, attr[:,:,:,:3]], dim=3)
+                  out = torch.cat([out, attr], dim=1)
+                else:
+                  attr = torch.cat([attr, attr], dim=2)
+                  attr = torch.cat([attr, attr], dim=3)
+                  out = torch.cat([out, attr], dim=1)
+            
+            out = l(out)
 
-      
-  def forward(self, imgs, labels):
-    batch_size = imgs.shape[0]
-
-    z_s,skip1,skip2,skip3 = self.encode(imgs) #pass the skip connections over to the decoder
-    
-    reconsts = self.decode(z_s, labels,skip1,skip2,skip3)
-    
-    return reconsts
- 
-  def encode(self, imgs):
-    out1 = self.layer1(imgs)
-    out2 = self.layer2(out1)
-    out3 = self.layer3(out2)
-    out4 = self.layer4(out3)
-    out5 = self.layer5(out4)
-    out6 = self.layer6(out5)
-    out7 = self.layer7(out6)
-
-    return out7,out1,out2,out3
-  
-  def decode_prob(self, z_s, hot_labels,skip1,skip2,skip3):
-    z_s = torch.cat([z_s, hot_labels], dim=1)
-
-    out1 = self.conv1(z_s)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=2) #expand the label vector to concatenate with intermediate outputs
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=3)
-    out1 = torch.cat([out1, hot_labels], dim=1)
-    
-    out2 = self.conv2(out1)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=2)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=3)
-    out2 = torch.cat([out2, hot_labels], dim=1)
-    
-    out3 = self.conv3(out2)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=2)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=3)
-    out3 = torch.cat([out3, hot_labels], dim=1)
-
-    out4 = self.conv4(out3)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=2)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=3)
-    # out4 = torch.cat([out4, hot_labels], dim=1)
-    out4 = torch.cat([out4, skip3], dim=1)
-    out4 = torch.cat([out4, hot_labels], dim=1)
-
-    out5 = self.conv5(out4)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=2)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=3)
-    # out5 = torch.cat([out5, hot_labels], dim=1)
-    out5 = torch.cat([out5, skip2], dim=1)
-    out5 = torch.cat([out5, hot_labels], dim=1)
-
-    out6 = self.conv6(out5)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=2)
-    hot_labels = torch.cat([hot_labels, hot_labels], dim=3)
-    # out6 = torch.cat([out6, hot_labels], dim=1)
-    out6 = torch.cat([out6, skip1], dim=1)
-    out6 = torch.cat([out6, hot_labels], dim=1)
-
-    out7 = self.conv7(out6)
-
-    return out7
-  def decode(self, z_s, labels,skip1,skip2,skip3):
-    batch_size = len(labels)
-    hot_digits = torch.zeros((batch_size, 2, 2, 2)).to(device)
-    labels = labels.long()
-    for i, digit in enumerate(labels):
-      hot_digits[i,digit,:,:] = 1
-    
-    return self.decode_prob(z_s, hot_digits,skip1,skip2,skip3)
-
-
-fader = FaderNetwork().to(device)
-disc = Discriminator().to(device)
-fader.cuda()
-disc.cuda()
-
-
-    
+        return out
